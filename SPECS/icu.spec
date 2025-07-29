@@ -2,10 +2,10 @@
 
 Name:      icu
 Version:   67.1
-Release:   9%{?dist}
+Release:   10%{?dist}
 Summary:   International Components for Unicode
 
-License:   MIT and UCD and Public Domain
+License:   Unicode-DFS-2016 AND BSD-2-Clause AND BSD-3-Clause AND LicenseRef-Fedora-Public-Domain
 URL:       http://site.icu-project.org/
 Source0:   https://github.com/unicode-org/icu/releases/download/release-67-1/icu4c-67_1-src.tgz
 Source1:   icu-config.sh
@@ -19,6 +19,8 @@ Requires: lib%{name}%{?_isa} = %{version}-%{release}
 Patch4: gennorm2-man.patch
 Patch5: icuinfo-man.patch
 Patch6: coverity.patch
+
+Patch20: ICU-22973-Fix-buffer-overflow-by-using-CharString.patch
 
 %description
 Tools and utilities for developing with icu.
@@ -181,6 +183,10 @@ LD_LIBRARY_PATH=lib:stubdata:tools/ctestfw:$LD_LIBRARY_PATH bin/uconv -l
 
 
 %changelog
+* Tue Jul 08 2025 Mike FABIAN <mfabian@redhat.com> - 67.1-10
+- ICU-22973 Fix buffer overflow by using CharString
+  Resolves: RHEL-96664
+
 * Wed Aug 18 2021 Mike FABIAN <mfabian@redhat.com> - 67.1-9
 - Resolves: rhbz#1938741 Fix coverity scan problems
 
