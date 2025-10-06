@@ -1,0 +1,390 @@
+From af6fbac0bdba3080a8bcb5d12764d1fece2e9c1d Mon Sep 17 00:00:00 2001
+From: Mike FABIAN <mfabian@redhat.com>
+Date: Mon, 23 Aug 2021 18:03:31 +0200
+Subject: [PATCH 1/2] ICU-21667 Fix coverity warnings
+
+See: https://unicode-org.atlassian.net/browse/ICU-21667
+(Issues found by coverity in icu-69.1)
+---
+ source/common/brkiter.cpp           |  2 +
+ source/common/serv.cpp              | 76 +++++++++++++----------
+ source/common/serv.h                |  5 ++
+ source/common/uloc_keytype.cpp      |  8 +++
+ source/common/umutablecptrie.cpp    |  2 +-
+ source/common/uresbund.cpp          |  3 +-
+ source/i18n/decNumber.h             |  2 +-
+ source/i18n/rbt_pars.cpp            |  7 +--
+ source/i18n/tridpars.cpp            |  1 +
+ source/i18n/usearch.cpp             |  2 +
+ source/i18n/uspoof_impl.cpp         |  6 +-
+ source/tools/gensprep/store.c       |  1 -
+ source/tools/makeconv/genmbcs.cpp   |  4 ++
+ source/tools/pkgdata/pkgtypes.c     | 12 ++--
+ source/tools/toolutil/filetools.cpp |  1 +
+ 15 files changed, 84 insertions(+), 48 deletions(-)
+
+diff --git a/source/common/brkiter.cpp b/source/common/brkiter.cpp
+index b452cf2c050..e2edbe8eaf6 100644
+--- a/source/common/brkiter.cpp
++++ b/source/common/brkiter.cpp
+@@ -107,7 +107,9 @@ BreakIterator::buildInstance(const Locale& loc, const char *type, UErrorCode &st
+         }
+     }
+ 
++    /* coverity[incorrect_free] */
+     ures_close(brkRules);
++    /* coverity[incorrect_free] */
+     ures_close(brkName);
+ 
+     UDataMemory* file = udata_open(U_ICUDATA_BRKITR, ext, fnbuff, &status);
+diff --git a/source/common/serv.cpp b/source/common/serv.cpp
+index 5248f7c192b..ddf17e45069 100644
+--- a/source/common/serv.cpp
++++ b/source/common/serv.cpp
+@@ -722,49 +722,57 @@ UVector&
+ ICUService::getDisplayNames(UVector& result, 
+                             const Locale& locale, 
+                             const UnicodeString* matchID, 
+-                            UErrorCode& status) const 
++                            UErrorCode& status) const
+ {
++    // cast away semantic const
++    return const_cast<ICUService *>(this)->getDisplayNamesImpl(result, locale, matchID, status);
++}
++
++UVector&
++ICUService::getDisplayNamesImpl(UVector& result,
++                            const Locale& locale,
++                            const UnicodeString* matchID,
++                            UErrorCode& status)
++{
++    if (U_FAILURE(status)) { return result; }
+     result.removeAllElements();
+     result.setDeleter(userv_deleteStringPair);
+-    if (U_SUCCESS(status)) {
+-        ICUService* ncthis = (ICUService*)this; // cast away semantic const
+-        Mutex mutex(&lock);
++    Mutex mutex(&lock);
+ 
+-        if (dnCache != nullptr && dnCache->locale != locale) {
+-            delete dnCache;
+-            ncthis->dnCache = nullptr;
+-        }
++    if (dnCache != nullptr && dnCache->locale != locale) {
++        delete dnCache;
++        dnCache = nullptr;
++    }
+ 
++    if (dnCache == nullptr) {
++        const Hashtable* m = getVisibleIDMap(status);
++        if (U_FAILURE(status)) {
++            return result;
++        }
++        dnCache = new DNCache(locale);
+         if (dnCache == nullptr) {
+-            const Hashtable* m = getVisibleIDMap(status);
+-            if (U_FAILURE(status)) {
+-                return result;
+-            }
+-            ncthis->dnCache = new DNCache(locale); 
+-            if (dnCache == nullptr) {
+-                status = U_MEMORY_ALLOCATION_ERROR;
+-                return result;
+-            }
++            status = U_MEMORY_ALLOCATION_ERROR;
++            return result;
++        }
+ 
+-            int32_t pos = UHASH_FIRST;
+-            const UHashElement* entry = nullptr;
+-            while ((entry = m->nextElement(pos)) != nullptr) {
+-                const UnicodeString* id = (const UnicodeString*)entry->key.pointer;
+-                ICUServiceFactory* f = (ICUServiceFactory*)entry->value.pointer;
+-                UnicodeString dname;
+-                f->getDisplayName(*id, locale, dname);
+-                if (dname.isBogus()) {
+-                    status = U_MEMORY_ALLOCATION_ERROR;
+-                } else {
+-                    dnCache->cache.put(dname, (void*)id, status); // share pointer with visibleIDMap
+-                    if (U_SUCCESS(status)) {
+-                        continue;
+-                    }
++        int32_t pos = UHASH_FIRST;
++        const UHashElement* entry = nullptr;
++        while ((entry = m->nextElement(pos)) != nullptr) {
++            const UnicodeString* id = static_cast<const UnicodeString*>(entry->key.pointer);
++            ICUServiceFactory* f = static_cast<ICUServiceFactory*>(entry->value.pointer);
++            UnicodeString dname;
++            f->getDisplayName(*id, locale, dname);
++            if (dname.isBogus()) {
++                status = U_MEMORY_ALLOCATION_ERROR;
++            } else {
++                dnCache->cache.put(dname, (void*)id, status); // share pointer with visibleIDMap
++                if (U_SUCCESS(status)) {
++                    continue;
+                 }
+-                delete dnCache;
+-                ncthis->dnCache = nullptr;
+-                return result;
+             }
++            delete dnCache;
++            dnCache = nullptr;
++            return result;
+         }
+     }
+ 
+diff --git a/source/common/serv.h b/source/common/serv.h
+index 9aea548fc3a..3c53f228738 100644
+--- a/source/common/serv.h
++++ b/source/common/serv.h
+@@ -759,6 +759,11 @@ class U_COMMON_API ICUService : public ICUNotifier {
+                              const UnicodeString* matchID, 
+                              UErrorCode& status) const;
+ 
++    UVector& getDisplayNamesImpl(UVector& result,
++                             const Locale& locale,
++                             const UnicodeString* matchID,
++                             UErrorCode& status);
++
+     /**
+      * <p>A convenience override of registerInstance(UObject*, const UnicodeString&, UBool)
+      * that defaults visible to true.</p>
+diff --git a/source/common/uloc_keytype.cpp b/source/common/uloc_keytype.cpp
+index a84b8609079..a837e0f14a7 100644
+--- a/source/common/uloc_keytype.cpp
++++ b/source/common/uloc_keytype.cpp
+@@ -327,12 +327,20 @@ initFromResourceBundle(UErrorCode& sts) {
+             }
+         }
+         if (U_FAILURE(sts)) {
++            if (typeDataMap != NULL) {
++                uhash_close(typeDataMap);
++                typeDataMap = NULL;
++            }
+             break;
+         }
+ 
+         LocExtKeyData* keyData = gLocExtKeyDataEntries->create();
+         if (keyData == nullptr) {
+             sts = U_MEMORY_ALLOCATION_ERROR;
++            if (typeDataMap != NULL) {
++                uhash_close(typeDataMap);
++                typeDataMap = NULL;
++            }
+             break;
+         }
+         keyData->bcpId = bcpKeyId;
+diff --git a/source/common/umutablecptrie.cpp b/source/common/umutablecptrie.cpp
+index cdbe27080b4..e58ab6f4897 100644
+--- a/source/common/umutablecptrie.cpp
++++ b/source/common/umutablecptrie.cpp
+@@ -1543,7 +1543,7 @@ int32_t MutableCodePointTrie::compactTrie(int32_t fastILimit, UErrorCode &errorC
+     MixedBlocks mixedBlocks;
+     int32_t newDataLength = compactData(fastILimit, newData, newDataCapacity,
+                                         dataNullIndex, mixedBlocks, errorCode);
+-    if (U_FAILURE(errorCode)) { return 0; }
++    if (U_FAILURE(errorCode)) { uprv_free(newData); return 0; }
+     U_ASSERT(newDataLength <= newDataCapacity);
+     uprv_free(data);
+     data = newData;
+diff --git a/source/common/uresbund.cpp b/source/common/uresbund.cpp
+index 5aa1c5fa2f1..7d16cd048ef 100644
+--- a/source/common/uresbund.cpp
++++ b/source/common/uresbund.cpp
+@@ -2927,7 +2927,8 @@ typedef struct ULocalesContext {
+ 
+ static void U_CALLCONV
+ ures_loc_closeLocales(UEnumeration *enumerator) {
+-    ULocalesContext *ctx = (ULocalesContext *)enumerator->context;
++    if (enumerator == nullptr) { return; }
++    ULocalesContext* ctx = (ULocalesContext *)(enumerator->context);
+     ures_close(&ctx->curr);
+     ures_close(&ctx->installed);
+     uprv_free(ctx);
+diff --git a/source/i18n/decNumber.h b/source/i18n/decNumber.h
+index 4a1eb364e19..6ad94386c1f 100644
+--- a/source/i18n/decNumber.h
++++ b/source/i18n/decNumber.h
+@@ -86,7 +86,7 @@
+                          /* range: -1999999997 through 999999999      */
+     uint8_t bits;        /* Indicator bits (see above)                */
+                          /* Coefficient, from least significant unit  */
+-    decNumberUnit lsu[DECNUMUNITS];
++    decNumberUnit lsu[DECNUMUNITS+2];
+     } decNumber;
+ 
+   /* Notes:                                                           */
+diff --git a/source/i18n/rbt_pars.cpp b/source/i18n/rbt_pars.cpp
+index 10482d5edb1..c59a22faab2 100644
+--- a/source/i18n/rbt_pars.cpp
++++ b/source/i18n/rbt_pars.cpp
+@@ -552,16 +552,15 @@ int32_t RuleHalf::parseSection(const UnicodeString& rule, int32_t pos, int32_t l
+         case ALT_FUNCTION:
+             {
+                 int32_t iref = pos;
+-                TransliteratorIDParser::SingleID* single =
+-                    TransliteratorIDParser::parseFilterID(rule, iref);
++                LocalPointer<TransliteratorIDParser::SingleID> single(
++                    TransliteratorIDParser::parseFilterID(rule, iref));
+                 // The next character MUST be a segment open
+-                if (single == nullptr ||
++                if (single.isNull() ||
+                     !ICU_Utility::parseChar(rule, iref, SEGMENT_OPEN)) {
+                     return syntaxError(U_INVALID_FUNCTION, rule, start, status);
+                 }
+                 
+                 Transliterator *t = single->createInstance();
+-                delete single;
+                 if (t == nullptr) {
+                     return syntaxError(U_INVALID_FUNCTION, rule, start, status);
+                 }
+diff --git a/source/i18n/tridpars.cpp b/source/i18n/tridpars.cpp
+index 6c23a0dc902..f9c3c207025 100644
+--- a/source/i18n/tridpars.cpp
++++ b/source/i18n/tridpars.cpp
+@@ -136,6 +136,7 @@ TransliteratorIDParser::parseSingleID(const UnicodeString& id, int32_t& pos,
+                 specsB = parseFilterID(id, pos, true);
+                 // Must close with a ')'
+                 if (specsB == nullptr || !ICU_Utility::parseChar(id, pos, CLOSE_REV)) {
++                    delete specsB;
+                     delete specsA;
+                     pos = start;
+                     return nullptr;
+diff --git a/source/i18n/usearch.cpp b/source/i18n/usearch.cpp
+index 6d9b60cef72..1fb82fe26a4 100644
+--- a/source/i18n/usearch.cpp
++++ b/source/i18n/usearch.cpp
+@@ -199,6 +199,7 @@ inline int32_t * addTouint32_tArray(int32_t    *destination,
+         int32_t *temp = (int32_t *)allocateMemory(
+                                          sizeof(int32_t) * newlength, status);
+         if (U_FAILURE(*status)) {
++            uprv_free(temp);
+             return nullptr;
+         }
+         uprv_memcpy(temp, destination, sizeof(int32_t) * (size_t)offset);
+@@ -240,6 +241,7 @@ inline int64_t * addTouint64_tArray(int64_t    *destination,
+                                          sizeof(int64_t) * newlength, status);
+ 
+         if (U_FAILURE(*status)) {
++            uprv_free(temp);
+             return nullptr;
+         }
+ 
+diff --git a/source/i18n/uspoof_impl.cpp b/source/i18n/uspoof_impl.cpp
+index 7a6084a1096..a1bd7d66a92 100644
+--- a/source/i18n/uspoof_impl.cpp
++++ b/source/i18n/uspoof_impl.cpp
+@@ -194,8 +194,12 @@ void SpoofImpl::setAllowedLocales(const char *localesList, UErrorCode &status) {
+ 
+     // Store the updated spoof checker state.
+     tmpSet = allowedChars.clone();
++    if (tmpSet == nullptr) {
++        status = U_MEMORY_ALLOCATION_ERROR;
++        return;
++    }
+     const char *tmpLocalesList = uprv_strdup(localesList);
+-    if (tmpSet == nullptr || tmpLocalesList == nullptr) {
++    if (tmpLocalesList == nullptr) {
+         status = U_MEMORY_ALLOCATION_ERROR;
+         return;
+     }
+diff --git a/source/tools/gensprep/store.c b/source/tools/gensprep/store.c
+index c3712febb4c..377877c94be 100644
+--- a/source/tools/gensprep/store.c
++++ b/source/tools/gensprep/store.c
+@@ -638,7 +638,6 @@ extern void
+ cleanUpData(void) {
+     uprv_free(mappingData);
+     utrie_close(sprepTrie);
+-    uprv_free(sprepTrie);
+ }
+ 
+ #endif /* #if !UCONFIG_NO_IDNA */
+diff --git a/source/tools/makeconv/genmbcs.cpp b/source/tools/makeconv/genmbcs.cpp
+index 43b96d814fb..0f610afeee4 100644
+--- a/source/tools/makeconv/genmbcs.cpp
++++ b/source/tools/makeconv/genmbcs.cpp
+@@ -173,6 +173,10 @@ MBCSOpen(UCMFile *ucm) {
+     }
+ 
+     MBCSInit(mbcsData, ucm);
++    /* The memory in the MBSData structure following
++     * newConverter will be properly freed in MBCSClose.
++     */
++    /* coverity[leaked_storage] */
+     return &mbcsData->newConverter;
+ }
+ 
+diff --git a/source/tools/pkgdata/pkgtypes.c b/source/tools/pkgdata/pkgtypes.c
+index 26bd945df73..ba516861a01 100644
+--- a/source/tools/pkgdata/pkgtypes.c
++++ b/source/tools/pkgdata/pkgtypes.c
+@@ -31,6 +31,7 @@ const char *pkg_writeCharListWrap(FileStream *s, CharList *l, const char *delim,
+ {
+     int32_t ln = 0;
+     char buffer[1024];
++    char *bufferp = buffer;
+     while(l != NULL)
+     {
+         if(l->str)
+@@ -43,7 +44,7 @@ const char *pkg_writeCharListWrap(FileStream *s, CharList *l, const char *delim,
+                     buffer[uprv_strlen(buffer)-1] = '\0';
+                 }
+                 if(buffer[0] == '"') {
+-                    uprv_strcpy(buffer, buffer+1);
++                    bufferp = buffer+1;
+                 }
+             } else if(quote > 0) { /* add quotes */
+                 if(l->str[0] != '"') {
+@@ -54,7 +55,7 @@ const char *pkg_writeCharListWrap(FileStream *s, CharList *l, const char *delim,
+                     uprv_strcat(buffer, "\"");
+                 }
+             }
+-            T_FileStream_write(s, buffer, (int32_t)uprv_strlen(buffer));
++            T_FileStream_write(s, bufferp, (int32_t)uprv_strlen(bufferp));
+ 
+             ln += (int32_t)uprv_strlen(l->str);
+         }
+@@ -75,7 +76,8 @@ const char *pkg_writeCharListWrap(FileStream *s, CharList *l, const char *delim,
+ 
+ const char *pkg_writeCharList(FileStream *s, CharList *l, const char *delim, int32_t quote)
+ {
+-    char buffer[1024];
++    char buffer[1026]; /* 1026 instead of 1024 because quotes may be added */
++    char *bufferp = buffer;
+     while(l != NULL)
+     {
+         if(l->str)
+@@ -93,7 +95,7 @@ const char *pkg_writeCharList(FileStream *s, CharList *l, const char *delim, int
+                     buffer[uprv_strlen(buffer)-1] = '\0';
+                 }
+                 if(buffer[0] == '"') {
+-                    uprv_strcpy(buffer, buffer+1);
++                    bufferp = buffer+1;
+                 }
+             } else if(quote > 0) { /* add quotes */
+                 if(l->str[0] != '"') {
+@@ -104,7 +106,7 @@ const char *pkg_writeCharList(FileStream *s, CharList *l, const char *delim, int
+                     uprv_strcat(buffer, "\"");
+                 }
+             }
+-            T_FileStream_write(s, buffer, (int32_t)uprv_strlen(buffer));
++            T_FileStream_write(s, bufferp, (int32_t)uprv_strlen(bufferp));
+         }
+ 
+         if(l->next && delim)
+diff --git a/source/tools/toolutil/filetools.cpp b/source/tools/toolutil/filetools.cpp
+index 994d8e31f00..8dcbb6a480a 100644
+--- a/source/tools/toolutil/filetools.cpp
++++ b/source/tools/toolutil/filetools.cpp
+@@ -64,6 +64,7 @@ isFileModTimeLater(const char *filePath, const char *checkAgainst, UBool isDir)
+                     newpath.append(dirEntry->d_name, -1, status);
+                     if (U_FAILURE(status)) {
+                         fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, u_errorName(status));
++                        closedir(pDir);
+                         return false;
+                     }
+ 
+-- 
+2.46.1
+
